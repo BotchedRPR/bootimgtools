@@ -1,0 +1,34 @@
+name: Build binaries
+
+on:
+  push:
+    branches: [ master ]
+
+  workflow_dispatch:
+
+jobs:
+  build:
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, [self-hosted, ARM64]]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - run: make
+
+      - run: |
+          chmod +x ./unpackbootimg
+          chmod +x ./mkbootimg
+
+      - name: Upload files
+        uses: actions/upload-artifact@v3
+        with:
+          name: unpackbootimg-${{ runner.arch }}
+          path: |
+            ./unpackbootimg
+            ./mkbootimg
+            ./mkbootimg.py
