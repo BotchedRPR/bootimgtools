@@ -19,11 +19,16 @@ jobs:
           chmod +x ./unpackbootimg
           chmod +x ./mkbootimg
 
-      - name: Upload files
+      - name: Upload binary - unpackbootimg
         uses: actions/upload-artifact@v3
         with:
-          name: unpackbootimg-${{ runner.arch }}
+          name: unpackbootimg
           path: |
             ./unpackbootimg
+
+      - name: Upload binary - mkbootimg
+        uses: actions/upload-artifact@v3
+        with:
+          name: mkbootimg
+          path: |
             ./mkbootimg
-            ./mkbootimg.py
