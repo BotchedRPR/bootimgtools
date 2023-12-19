@@ -1,20 +1,41 @@
-unpackbootimg
+bootimgtools
 =============
 
-unpackbootimg & mkbootimg to work with Android boot images.
+## A user-friendlier fork of the classic android-mkbootimg.
 
-Since image tools are not part of Android SDK, this standalone port of AOSP system/core aims to avoid complex building chains.
+### Building
+
+``
+$ make
+``
+
+### Usage: unpackbootimg
 
 ```
-$ make
 $ ./unpackbootimg
 usage: unpackbootimg
   -i|--input boot.img
   [ -o|--output output_directory]
   [ -p|--pagesize <size-in-hexadecimal> ]
+  [ -n|--no-config ]
+```
+
+### Usage: mkbootimg
+
+```
+$ ./mkbootimg
+usage: mkbootimg
+       --imgdir <image-directory>
+       -o|--output <filename>
+```
+
+### Usage: mkbootimg (without config file)
+
+```
 $ ./mkbootimg
 usage: mkbootimg
        --kernel <filename>
+       --no-config
        [ --ramdisk <filename> ]
        [ --second <2ndbootloader-filename> ]
        [ --cmdline <kernel-commandline> ]
@@ -31,16 +52,9 @@ usage: mkbootimg
        [ --hash <sha1(default)|sha256> ]
        [ --id ]
        -o|--output <filename>
-$ ./mkbootimg.py
-usage: mkbootimg.py [-h] --kernel KERNEL [--ramdisk RAMDISK] [--second SECOND]
-                    [--cmdline CMDLINE] [--base BASE]
-                    [--kernel_offset KERNEL_OFFSET]
-                    [--ramdisk_offset RAMDISK_OFFSET]
-                    [--second_offset SECOND_OFFSET] [--os_version OS_VERSION]
-                    [--os_patch_level OS_PATCH_LEVEL]
-                    [--tags_offset TAGS_OFFSET] [--board BOARD]
-                    [--pagesize {2048,4096,8192,16384}] [--id] -o OUTPUT
 ```
+
+
 
 Credits to [@osm0sis](https://github.com/osm0sis/mkbootimg) for maintaining
 most of the unpackbootimg logic that is no longer present in AOSP.
