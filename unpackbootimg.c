@@ -6,89 +6,129 @@
 #include <errno.h>
 #include <limits.h>
 #include <libgen.h>
+#include <inttypes.h>
+#include <sys/types.h>
 #include <sys/stat.h>
 
 #include "mincrypt/sha.h"
+#include "mincrypt/sha256.h"
 #include "bootimg.h"
 
 typedef unsigned char byte;
 
-int read_padding(FILE* f, unsigned itemsize, int pagesize)
+char *directory = "./";
+char *filename = NULL;
+int debug = 0;
+
+int total_read = 0;
+
+int pagesize = 0;
+int a = 0, b = 0, c = 0, y = 0, m = 0; // header.os_version component calculation variables
+
+int read_padding(FILE *f, unsigned itemsize)
 {
-    byte* buf = (byte*)malloc(sizeof(byte) * pagesize);
+    byte *buf = (byte *)malloc(sizeof(byte) * pagesize);
     unsigned pagemask = pagesize - 1;
     unsigned count;
-
     if((itemsize & pagemask) == 0) {
         free(buf);
         return 0;
     }
-
     count = pagesize - (itemsize & pagemask);
-
-    if(fread(buf, count, 1, f)){};
+    if(fread(buf, count, 1, f)) {};
     free(buf);
+    if(debug > 1) fprintf(stderr, "read padding: %d\n", count);
     return count;
 }
 
-int write_string_to_file(const char* file, const char* string)
+void write_string_to_file(const char *name, const char *string)
 {
-    // Try to create a directory first.
-    char* fcopy = strdup(file);
-    mkdir(dirname(fcopy), 0777);
-    free(fcopy);
+    char file[PATH_MAX];
+    sprintf(file, "%s/%s-%s", directory, basename(filename), name);
+    FILE *t = fopen(file, "w");
+    if(debug > 0) fprintf(stderr, "%s...\n", name);
+    fwrite(string, strlen(string), 1, t);
+    fwrite("\n", 1, 1, t);
+    fclose(t);
+}
 
-    FILE* f = fopen(file, "w");
-    if (!f) {
-        printf("File %s can't be opened.\n", file);
-        return 1;
+void write_buffer_to_file(const char *name, FILE *f, const int size)
+{
+    char file[PATH_MAX];
+    sprintf(file, "%s/%s-%s", directory, basename(filename), name);
+    FILE *t = fopen(file, "wb");
+    byte *buf = (byte *)malloc(size);
+    if(debug > 0) fprintf(stderr, "Reading %s...\n", name);
+    if(fread(buf, size, 1, f)) {};
+    total_read += size;
+    if(debug > 1) fprintf(stderr, "read: %d\n", size);
+    fwrite(buf, size, 1, t);
+    fclose(t);
+    free(buf);
+    total_read += read_padding(f, size);
+}
+
+const char *detect_hash_type(boot_img_hdr_v2 *hdr)
+{
+    // sha1 is expected to have zeroes in id[20] and higher
+    // offset by 4 to accomodate bootimg variants with BOOT_NAME_SIZE 20
+    uint8_t id[SHA256_DIGEST_SIZE];
+    memcpy(&id, hdr->id, sizeof(id));
+    int i;
+    for(i = SHA_DIGEST_SIZE + 4; i < SHA256_DIGEST_SIZE; ++i) {
+        if(id[i]) {
+            return "sha256";
+        }
     }
-    fwrite(string, strlen(string), 1, f);
-    fwrite("\n", 1, 1, f);
-    fclose(f);
-    return 0;
+    return "sha1";
 }
 
-const char *detect_hash_type(const struct boot_img_hdr *hdr)
+int print_os_version(uint32_t hdr_os_ver)
 {
-    /*
-     * This isn't a sophisticated or 100% reliable method to detect the hash
-     * type but it's probably good enough.
-     *
-     * sha256 is expected to have no zeroes in the id array
-     * sha1 is expected to have zeroes in id[5], id[6] and id[7]
-     * Zeroes anywhere else probably indicates neither.
-     */
-    const uint32_t *id = hdr->id;
-    if (id[0] != 0 && id[1] != 0 && id[2] != 0 && id[3] != 0 &&
-        id[4] != 0 && id[5] != 0 && id[6] != 0 && id[7] != 0)
-        return "sha256";
-    else if (id[0] != 0 && id[1] != 0 && id[2] != 0 && id[3] != 0 &&
-        id[4] != 0 && id[5] == 0 && id[6] == 0 && id[7] == 0)
-        return "sha1";
-    else
-        return "unknown";
+    if(hdr_os_ver != 0) {
+        int os_version = 0, os_patch_level = 0;
+        os_version = hdr_os_ver >> 11;
+        os_patch_level = hdr_os_ver&0x7ff;
+
+        a = (os_version >> 14)&0x7f;
+        b = (os_version >> 7)&0x7f;
+        c = os_version&0x7f;
+
+        y = (os_patch_level >> 4) + 2000;
+        m = os_patch_level&0xf;
+    }
+    if((a < 128) && (b < 128) && (c < 128) && (y >= 2000) && (y < 2128) && (m > 0) && (m <= 12)) {
+        printf("BOARD_OS_VERSION %d.%d.%d\n", a, b, c);
+        printf("BOARD_OS_PATCH_LEVEL %d-%02d\n", y, m);
+        return 0;
+    }
+    return 1;
 }
 
-int usage() {
-    printf("usage: unpackbootimg\n");
-    printf("\t-i|--input boot.img\n");
-    printf("\t[ -o|--output output_directory]\n");
-    printf("\t[ -p|--pagesize <size-in-hexadecimal> ]\n");
-    return 0;
-}
-
-int main(int argc, char** argv)
+int usage(void)
 {
-    char tmp[PATH_MAX];
-    char* directory = "./";
-    char* filename = NULL;
-    int pagesize = 0;
+    fprintf(stderr,
+        "usage: unpackbootimg\n"
+        "\t-i|--input <filename>\n"
+        "\t[ -o|--output <directory> ]\n"
+        "\t[ -p|--pagesize <size-in-hexadecimal> ]\n"
+    );
+    if(debug > 0) fprintf(stderr, "\t[ -d|--debug <debug-level> ]\n");
+    return 1;
+}
+
+int main(int argc, char **argv)
+{
+    char tmp[BOOT_MAGIC_SIZE];
+    char *magic = NULL;
     int base = 0;
+
+    int seeklimit = 65536; // arbitrary byte limit to search in input file for ANDROID!/VNDRBOOT magic
+    int hdr_ver_max = 8; // arbitrary maximum header version value; when greater assume the field is appended dt size
 
     argc--;
     argv++;
-    while(argc > 0){
+    while(argc > 0) {
         char *arg = argv[0];
         char *val = argv[1];
         argc -= 2;
@@ -99,240 +139,294 @@ int main(int argc, char** argv)
             directory = val;
         } else if(!strcmp(arg, "--pagesize") || !strcmp(arg, "-p")) {
             pagesize = strtoul(val, 0, 16);
+        } else if(!strcmp(arg, "--debug") || !strcmp(arg, "-d")) {
+            debug = strtoul(val, 0, 10);
         } else {
             return usage();
         }
     }
 
-    if (filename == NULL) {
+    if(filename == NULL) {
         return usage();
     }
 
-    int total_read = 0;
-    FILE* f = fopen(filename, "rb");
-    if (!f) {
-        printf("Input file not found.\n");
+    struct stat st;
+    if(stat(directory, &st) == (-1)) {
+        fprintf(stderr, "Could not stat %s: %s\n", directory, strerror(errno));
         return 1;
     }
-    boot_img_hdr header;
+    if(!S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "%s is not a directory\n", directory);
+        return 1;
+    }
 
-    //printf("Reading header...\n");
+    FILE *f = fopen(filename, "rb");
+    if(!f) {
+        fprintf(stderr, "Could not open input file: %s\n", strerror(errno));
+        return 1;
+    }
+
+    if(debug > 0) fprintf(stderr, "Reading header...\n");
     int i;
-    int seeklimit = 65536;
-    for (i = 0; i <= seeklimit; i++) {
+    for(i = 0; i <= seeklimit; i++) {
         fseek(f, i, SEEK_SET);
-        if(fread(tmp, BOOT_MAGIC_SIZE, 1, f)){};
-        if (memcmp(tmp, BOOT_MAGIC, BOOT_MAGIC_SIZE) == 0)
+        if(fread(tmp, BOOT_MAGIC_SIZE, 1, f)) {};
+        if(memcmp(tmp, BOOT_MAGIC, BOOT_MAGIC_SIZE) == 0) {
+            magic = BOOT_MAGIC;
             break;
+        }
+        if(memcmp(tmp, VENDOR_BOOT_MAGIC, VENDOR_BOOT_MAGIC_SIZE) == 0) {
+            magic = VENDOR_BOOT_MAGIC;
+            break;
+        }
     }
     total_read = i;
-    if (i > seeklimit) {
-        printf("Android boot magic not found.\n");
+    if(i > seeklimit) {
+        fprintf(stderr, "Boot image magic not found.\n");
         return 1;
     }
+    printf("%s magic found at: %d\n", magic, i);
+
+    boot_img_hdr_v3 header;
     fseek(f, i, SEEK_SET);
-    if (i > 0) {
-        printf("Android magic found at: %d\n", i);
-    }
+    if(fread(&header, sizeof(header), 1, f)) {};
 
-    if(fread(&header, sizeof(header), 1, f)){};
-    base = header.kernel_addr - 0x00008000;
-    printf("BOARD_KERNEL_CMDLINE %s\n", header.cmdline);
-    printf("BOARD_KERNEL_BASE %08x\n", base);
-    printf("BOARD_NAME %s\n", header.name);
-    printf("BOARD_PAGE_SIZE %d\n", header.page_size);
-    printf("BOARD_HASH_TYPE %s\n", detect_hash_type(&header));
-    printf("BOARD_KERNEL_OFFSET %08x\n", header.kernel_addr - base);
-    printf("BOARD_RAMDISK_OFFSET %08x\n", header.ramdisk_addr - base);
-    printf("BOARD_SECOND_OFFSET %08x\n", header.second_addr - base);
-    printf("BOARD_TAGS_OFFSET %08x\n", header.tags_addr - base);
-    int a, b, c, y, m;
-    a = b = c = y = m = 0;
-    if (header.os_version != 0) {
-        int os_version,os_patch_level;
-        os_version = header.os_version >> 11;
-        os_patch_level = header.os_version&0x7ff;
+    if(!strcmp(magic, BOOT_MAGIC)) {
+        if((header.header_version < 3) || (header.header_version > hdr_ver_max)) {
+            // boot_img_hdr_v2 in the backported header supports all boot_img_hdr versions and cross-compatible variants below 3
 
-        a = (os_version >> 14)&0x7f;
-        b = (os_version >> 7)&0x7f;
-        c = os_version&0x7f;
+            fseek(f, i, SEEK_SET);
+            boot_img_hdr_v2 header;
+            if(fread(&header, sizeof(header), 1, f)) {};
 
-        y = (os_patch_level >> 4) + 2000;
-        m = os_patch_level&0xf;
-
-        if((a < 128) && (b < 128) && (c < 128) && (y >= 2000) && (y < 2128) && (m > 0) && (m <= 12)) {
-            printf("BOARD_OS_VERSION %d.%d.%d\n", a, b, c);
-            printf("BOARD_OS_PATCH_LEVEL %d-%02d\n", y, m);
-        } else {
-            header.os_version = 0;
-        }
-    }
-    if (header.dt_size != 0) {
-        printf("BOARD_DT_SIZE %d\n", header.dt_size);
-    }
-
-    if (pagesize == 0) {
-        pagesize = header.page_size;
-    }
-
-    //printf("cmdline...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-cmdline");
-    write_string_to_file(tmp, (char *)header.cmdline);
-
-    //printf("board...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-board");
-    write_string_to_file(tmp, (char *)header.name);
-
-    //printf("base...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-base");
-    char basetmp[200];
-    sprintf(basetmp, "%08x", base);
-    write_string_to_file(tmp, basetmp);
-
-    //printf("pagesize...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-pagesize");
-    char pagesizetmp[200];
-    sprintf(pagesizetmp, "%d", header.page_size);
-    write_string_to_file(tmp, pagesizetmp);
-
-    //printf("kerneloff...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-kerneloff");
-    char kernelofftmp[200];
-    sprintf(kernelofftmp, "%08x", header.kernel_addr - base);
-    write_string_to_file(tmp, kernelofftmp);
-
-    //printf("ramdiskoff...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-ramdiskoff");
-    char ramdiskofftmp[200];
-    sprintf(ramdiskofftmp, "%08x", header.ramdisk_addr - base);
-    write_string_to_file(tmp, ramdiskofftmp);
-
-    //printf("secondoff...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-secondoff");
-    char secondofftmp[200];
-    sprintf(secondofftmp, "%08x", header.second_addr - base);
-    write_string_to_file(tmp, secondofftmp);
-
-    //printf("tagsoff...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-tagsoff");
-    char tagsofftmp[200];
-    sprintf(tagsofftmp, "%08x", header.tags_addr - base);
-    write_string_to_file(tmp, tagsofftmp);
-
-    if (header.os_version != 0) {
-        //printf("os_version...\n");
-        sprintf(tmp, "%s/%s", directory, basename(filename));
-        strcat(tmp, "-osversion");
-        char osvertmp[200];
-        sprintf(osvertmp, "%d.%d.%d", a, b, c);
-        write_string_to_file(tmp, osvertmp);
-
-        //printf("os_patch_level...\n");
-        sprintf(tmp, "%s/%s", directory, basename(filename));
-        strcat(tmp, "-oslevel");
-        char oslvltmp[200];
-        sprintf(oslvltmp, "%d-%02d", y, m);
-        write_string_to_file(tmp, oslvltmp);
-    }
-
-    //printf("hash...\n");
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-hash");
-    const char *hashtype = detect_hash_type(&header);
-    write_string_to_file(tmp, hashtype);
-
-    total_read += sizeof(header);
-    //printf("total read: %d\n", total_read);
-    total_read += read_padding(f, sizeof(header), pagesize);
-
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-zImage");
-    FILE *k = fopen(tmp, "wb");
-    byte* kernel = (byte*)malloc(header.kernel_size);
-    //printf("Reading kernel...\n");
-    if(fread(kernel, header.kernel_size, 1, f)){};
-    total_read += header.kernel_size;
-    fwrite(kernel, header.kernel_size, 1, k);
-    fclose(k);
-
-    //printf("total read: %d\n", header.kernel_size);
-    total_read += read_padding(f, header.kernel_size, pagesize);
-
-    sprintf(tmp, "%s/%s", directory, basename(filename));
-    strcat(tmp, "-ramdisk.gz");
-    FILE *r = fopen(tmp, "wb");
-    byte* ramdisk = (byte*)malloc(header.ramdisk_size);
-    //printf("Reading ramdisk...\n");
-    if(fread(ramdisk, header.ramdisk_size, 1, f)){};
-    total_read += header.ramdisk_size;
-    fwrite(ramdisk, header.ramdisk_size, 1, r);
-    fclose(r);
-
-    //printf("total read: %d\n", header.ramdisk_size);
-    total_read += read_padding(f, header.ramdisk_size, pagesize);
-
-    /*
-     * Even though the second_size is 0, some vendors may place a signature
-     * image there. In such a case read to EOF and try to calculate the
-     * size based on termination with a null, then fix it in header.
-     */
-    if (header.second_size == 0) {
-        struct stat st;
-        stat(filename, &st);
-        int second_test_size = st.st_size - total_read;
-        if (second_test_size > header.dt_size) {
-            byte* second_test = (byte*)malloc(second_test_size);
-            if(fread(second_test, second_test_size, 1, f)){};
-            u_int16_t *sbuf = (u_int16_t*)second_test;
-            if (sbuf[0]) {
-                int second_size = 0;
-                while (sbuf[0]) {
-                    second_size += 2;
-                    sbuf++;
-                }
-                if ((second_size >= 1024) && (second_size < 2048))
-                    header.second_size = second_size;
+            base = header.kernel_addr - 0x00008000;
+            if(pagesize == 0) {
+                pagesize = header.page_size;
             }
-            fseek(f, total_read, SEEK_SET);
+            const char *hash_type = detect_hash_type(&header);
+
+            printf("BOARD_KERNEL_CMDLINE %.*s%.*s\n", BOOT_ARGS_SIZE, header.cmdline, BOOT_EXTRA_ARGS_SIZE, header.extra_cmdline);
+            printf("BOARD_KERNEL_BASE 0x%08x\n", base);
+            printf("BOARD_NAME %s\n", header.name);
+            printf("BOARD_PAGE_SIZE %d\n", header.page_size);
+            printf("BOARD_HASH_TYPE %s\n", hash_type);
+            printf("BOARD_KERNEL_OFFSET 0x%08x\n", header.kernel_addr - base);
+            printf("BOARD_RAMDISK_OFFSET 0x%08x\n", header.ramdisk_addr - base);
+            printf("BOARD_SECOND_OFFSET 0x%08x\n", header.second_addr - base);
+            printf("BOARD_TAGS_OFFSET 0x%08x\n", header.tags_addr - base);
+            if(print_os_version(header.os_version) == 1) {
+                header.os_version = 0;
+            }
+            if(header.dt_size > hdr_ver_max) {
+                printf("BOARD_DT_SIZE %d\n", header.dt_size);
+            } else {
+                printf("BOARD_HEADER_VERSION %d\n", header.header_version);
+            }
+            if(header.header_version <= hdr_ver_max) {
+                if(header.header_version > 0) {
+                    if(header.recovery_dtbo_size != 0) {
+                        printf("BOARD_RECOVERY_DTBO_SIZE %d\n", header.recovery_dtbo_size);
+                        printf("BOARD_RECOVERY_DTBO_OFFSET %"PRId64"\n", header.recovery_dtbo_offset);
+                    }
+                    printf("BOARD_HEADER_SIZE %d\n", header.header_size);
+                } else {
+                    header.recovery_dtbo_size = 0;
+                }
+                if(header.header_version > 1) {
+                    if(header.dtb_size != 0) {
+                        printf("BOARD_DTB_SIZE %d\n", header.dtb_size);
+                        printf("BOARD_DTB_OFFSET 0x%08"PRIx64"\n", header.dtb_addr - base);
+                    }
+                } else {
+                    header.dtb_size = 0;
+                }
+            }
+
+            char cmdlinetmp[BOOT_ARGS_SIZE+BOOT_EXTRA_ARGS_SIZE+1];
+            sprintf(cmdlinetmp, "%.*s%.*s", BOOT_ARGS_SIZE, header.cmdline, BOOT_EXTRA_ARGS_SIZE, header.extra_cmdline);
+            cmdlinetmp[BOOT_ARGS_SIZE+BOOT_EXTRA_ARGS_SIZE]='\0';
+            write_string_to_file("cmdline", cmdlinetmp);
+
+            write_string_to_file("board", (char *)header.name);
+
+            char basetmp[200];
+            sprintf(basetmp, "0x%08x", base);
+            write_string_to_file("base", basetmp);
+
+            char pagesizetmp[200];
+            sprintf(pagesizetmp, "%d", header.page_size);
+            write_string_to_file("pagesize", pagesizetmp);
+
+            char kernelofftmp[200];
+            sprintf(kernelofftmp, "0x%08x", header.kernel_addr - base);
+            write_string_to_file("kernel_offset", kernelofftmp);
+
+            char ramdiskofftmp[200];
+            sprintf(ramdiskofftmp, "0x%08x", header.ramdisk_addr - base);
+            write_string_to_file("ramdisk_offset", ramdiskofftmp);
+
+            char secondofftmp[200];
+            sprintf(secondofftmp, "0x%08x", header.second_addr - base);
+            write_string_to_file("second_offset", secondofftmp);
+
+            char tagsofftmp[200];
+            sprintf(tagsofftmp, "0x%08x", header.tags_addr - base);
+            write_string_to_file("tags_offset", tagsofftmp);
+
+            if(header.os_version != 0) {
+                char osvertmp[200];
+                sprintf(osvertmp, "%d.%d.%d", a, b, c);
+                write_string_to_file("os_version", osvertmp);
+
+                char oslvltmp[200];
+                sprintf(oslvltmp, "%d-%02d", y, m);
+                write_string_to_file("os_patch_level", oslvltmp);
+            }
+
+            if(header.header_version <= hdr_ver_max) {
+                char hdrvertmp[200];
+                sprintf(hdrvertmp, "%d\n", header.header_version); // extra newline to prevent some file editors from interpreting a 2-byte file as Unicode
+                write_string_to_file("header_version", hdrvertmp);
+
+                if(header.header_version > 1) {
+                    char dtbofftmp[200];
+                    sprintf(dtbofftmp, "0x%08"PRIx64, header.dtb_addr - base);
+                    write_string_to_file("dtb_offset", dtbofftmp);
+                }
+            }
+
+            write_string_to_file("hashtype", hash_type);
+
+            total_read += sizeof(header);
+            if(debug > 1) fprintf(stderr, "read: %d\n", total_read); // this will harmlessly always show 1660 since it uses boot_img_hdr_v2 for all < v3
+            total_read += read_padding(f, sizeof(header));
+
+            write_buffer_to_file("kernel", f, header.kernel_size);
+
+            write_buffer_to_file("ramdisk", f, header.ramdisk_size);
+
+            if(header.second_size != 0) {
+                write_buffer_to_file("second", f, header.second_size);
+            }
+
+            if(header.dt_size > hdr_ver_max) {
+                write_buffer_to_file("dt", f, header.dt_size);
+            } else {
+                if(header.recovery_dtbo_size != 0) {
+                    write_buffer_to_file("recovery_dtbo", f, header.recovery_dtbo_size);
+                }
+                if(header.dtb_size != 0) {
+                    write_buffer_to_file("dtb", f, header.dtb_size);
+                }
+            }
+        } else {
+            // boot_img_hdr_v3 and above are no longer backwards compatible
+
+            if(pagesize == 0) {
+                pagesize = 0x00001000; // page_size is hardcoded to 4096 in boot_img_hdr_v3 and above
+            }
+
+            printf("BOARD_KERNEL_CMDLINE %.*s\n", BOOT_ARGS_SIZE+BOOT_EXTRA_ARGS_SIZE, header.cmdline);
+            printf("BOARD_PAGE_SIZE 4096\n");
+            print_os_version(header.os_version);
+            printf("BOARD_HEADER_VERSION %d\n", header.header_version);
+            printf("BOARD_HEADER_SIZE %d\n", header.header_size);
+
+            char cmdlinetmp[BOOT_ARGS_SIZE+BOOT_EXTRA_ARGS_SIZE+1];
+            sprintf(cmdlinetmp, "%.*s", BOOT_ARGS_SIZE+BOOT_EXTRA_ARGS_SIZE, header.cmdline);
+            cmdlinetmp[BOOT_ARGS_SIZE+BOOT_EXTRA_ARGS_SIZE]='\0';
+            write_string_to_file("cmdline", cmdlinetmp);
+
+            char osvertmp[200];
+            sprintf(osvertmp, "%d.%d.%d", a, b, c);
+            write_string_to_file("os_version", osvertmp);
+
+            char oslvltmp[200];
+            sprintf(oslvltmp, "%d-%02d", y, m);
+            write_string_to_file("os_patch_level", oslvltmp);
+
+            char hdrvertmp[200];
+            sprintf(hdrvertmp, "%d\n", header.header_version); // extra newline to prevent some file editors from interpreting a 2-byte file as Unicode
+            write_string_to_file("header_version", hdrvertmp);
+
+            total_read += sizeof(header);
+            if(debug > 1) fprintf(stderr, "read: %d\n", total_read);
+            total_read += read_padding(f, sizeof(header));
+
+            write_buffer_to_file("kernel", f, header.kernel_size);
+
+            write_buffer_to_file("ramdisk", f, header.ramdisk_size);
         }
-    }
-    if (header.second_size != 0) {
-        sprintf(tmp, "%s/%s", directory, basename(filename));
-        strcat(tmp, "-second");
-        FILE *s = fopen(tmp, "wb");
-        byte* second = (byte*)malloc(header.second_size);
-        //printf("Reading second...\n");
-        if(fread(second, header.second_size, 1, f)){};
-        total_read += header.second_size;
-        fwrite(second, header.second_size, 1, s);
-        fclose(s);
-    }
+    } else {
+        // vendor_boot_img_hdr started at v3 and is not cross-compatible with boot_img_hdr
 
-    //printf("total read: %d\n", header.second_size);
-    total_read += read_padding(f, header.second_size, pagesize);
+        fseek(f, i, SEEK_SET);
+        vendor_boot_img_hdr_v3 header;
+        if(fread(&header, sizeof(header), 1, f)) {};
 
-    if (header.dt_size != 0) {
-        sprintf(tmp, "%s/%s", directory, basename(filename));
-        strcat(tmp, "-dtb");
-        FILE *d = fopen(tmp, "wb");
-        byte* dtb = (byte*)malloc(header.dt_size);
-        //printf("Reading dtb...\n");
-        if(fread(dtb, header.dt_size, 1, f)){};
-        total_read += header.dt_size;
-        fwrite(dtb, header.dt_size, 1, d);
-        fclose(d);
+        base = header.kernel_addr - 0x00008000;
+        if(pagesize == 0) {
+            pagesize = header.page_size;
+        }
+
+        printf("BOARD_VENDOR_CMDLINE %.*s\n", VENDOR_BOOT_ARGS_SIZE, header.cmdline);
+        printf("BOARD_VENDOR_BASE 0x%08x\n", base);
+        printf("BOARD_NAME %s\n", header.name);
+        printf("BOARD_PAGE_SIZE %d\n", header.page_size);
+        printf("BOARD_KERNEL_OFFSET 0x%08x\n", header.kernel_addr - base);
+        printf("BOARD_RAMDISK_OFFSET 0x%08x\n", header.ramdisk_addr - base);
+        printf("BOARD_TAGS_OFFSET 0x%08x\n", header.tags_addr - base);
+        printf("BOARD_HEADER_VERSION %d\n", header.header_version);
+        printf("BOARD_HEADER_SIZE %d\n", header.header_size);
+        printf("BOARD_DTB_SIZE %d\n", header.dtb_size);
+        printf("BOARD_DTB_OFFSET 0x%08"PRIx64"\n", header.dtb_addr - base);
+
+        char cmdlinetmp[VENDOR_BOOT_ARGS_SIZE+1];
+        sprintf(cmdlinetmp, "%.*s", VENDOR_BOOT_ARGS_SIZE, header.cmdline);
+        cmdlinetmp[VENDOR_BOOT_ARGS_SIZE]='\0';
+        write_string_to_file("vendor_cmdline", cmdlinetmp);
+
+        write_string_to_file("board", (char *)header.name);
+
+        char basetmp[200];
+        sprintf(basetmp, "0x%08x", base);
+        write_string_to_file("base", basetmp);
+
+        char pagesizetmp[200];
+        sprintf(pagesizetmp, "%d", header.page_size);
+        write_string_to_file("pagesize", pagesizetmp);
+
+        char kernelofftmp[200];
+        sprintf(kernelofftmp, "0x%08x", header.kernel_addr - base);
+        write_string_to_file("kernel_offset", kernelofftmp);
+
+        char ramdiskofftmp[200];
+        sprintf(ramdiskofftmp, "0x%08x", header.ramdisk_addr - base);
+        write_string_to_file("ramdisk_offset", ramdiskofftmp);
+
+        char tagsofftmp[200];
+        sprintf(tagsofftmp, "0x%08x", header.tags_addr - base);
+        write_string_to_file("tags_offset", tagsofftmp);
+
+        char hdrvertmp[200];
+        sprintf(hdrvertmp, "%d\n", header.header_version); // extra newline to prevent some file editors from interpreting a 2-byte file as Unicode
+        write_string_to_file("header_version", hdrvertmp);
+
+        char dtbofftmp[200];
+        sprintf(dtbofftmp, "0x%08"PRIx64, header.dtb_addr - base);
+        write_string_to_file("dtb_offset", dtbofftmp);
+
+        total_read += sizeof(header);
+        if(debug > 1) fprintf(stderr, "read: %d\n", total_read);
+        total_read += read_padding(f, sizeof(header));
+
+        write_buffer_to_file("vendor_ramdisk", f, header.vendor_ramdisk_size);
+
+        write_buffer_to_file("dtb", f, header.dtb_size);
     }
 
     fclose(f);
 
-    //printf("Total Read: %d\n", total_read);
+    if(debug > 0) fprintf(stderr, "Total Read: %d\n", total_read);
     return 0;
 }
